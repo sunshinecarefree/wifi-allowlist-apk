@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Wi-Fi 白名单</string>
+    <string name="admin_description">用于通过 Android 系统设备策略限制可连接的 Wi-Fi SSID。</string>
+</resources>
