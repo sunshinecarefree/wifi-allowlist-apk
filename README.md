@@ -1,36 +1,49 @@
 # Wi-Fi Allowlist APK
 
-A standalone Android app for managing an SSID allowlist locally on one device.
+Standalone, on-device Wi-Fi management app. No MDM server is required.
 
-## Build
+## Android compatibility
 
-Every push to `main` starts the GitHub Actions workflow **Build Android APK**. You can also start it manually from the Actions tab. When the build finishes successfully, open the run and download the artifact named `wifi-allowlist-debug-apk`; it contains `app-debug.apk`.
+| Android | API | Behavior |
+|---|---:|---|
+| Android 9 | 28 | Limited mode only |
+| Android 10 | 29 | Limited mode only |
+| Android 11 | 30 | Limited mode only |
+| Android 12 / 12L | 31–32 | Limited mode only |
+| Android 13 and newer | 33+ | System-enforced SSID allowlist |
 
-## Device requirements and important limitation
+### Android 13+
 
-- Android 13 (API 33) or newer.
-- The app must be provisioned as the **Device Owner** before it can apply the system Wi-Fi SSID policy. A normal APK install or ordinary device-admin activation is not enough.
-- The allowlist is enforced by Android's `DevicePolicyManager.setWifiSsidPolicy()`. The system only permits SSIDs in the allowlist and disconnects from the current network when it is outside the allowlist.
-- Add the SSID of the currently connected network before enabling the policy, or the device may disconnect from Wi-Fi.
-- The policy matches SSID names, not router BSSIDs. Different access points with the same SSID are treated as the same network name.
-- Setting Device Owner is a device-provisioning operation and commonly requires a fresh or factory-reset device. Back up your data first.
+Uses `DevicePolicyManager.setWifiSsidPolicy()`. Android only permits connections to SSIDs in the allowlist and disconnects from the current network if it is not allowed.
 
-## Install and provision (ADB)
+### Android 9–12: limited compatibility mode
 
-Install the APK:
+Uses the Device Owner user restriction `UserManager.DISALLOW_CONFIG_WIFI`. This prevents the user from changing Wi-Fi access points through system Settings. It is **not** an SSID allowlist: it does not guarantee that previously saved non-listed networks will not auto-connect, and it cannot guarantee blocking connections initiated through every other system entry point or app.
+
+This limitation is imposed by Android APIs; the app clearly labels the mode in its UI.
+
+## Device Owner requirement
+
+Both modes require the app to be provisioned as **Device Owner**. A normal install or ordinary device-admin activation is not enough. Setting Device Owner commonly requires a fresh/factory-reset device. Back up data first.
+
+Install APK:
 
 ```bash
 adb install app-debug.apk
 ```
 
-Then, on a compatible freshly provisioned device, set this package as Device Owner:
+Provision on a compatible, freshly initialized device:
 
 ```bash
 adb shell dpm set-device-owner com.local.wifiallowlist/.AdminReceiver
 ```
 
-Open **Wi-Fi 白名单**, add the allowed SSIDs, and select **启用系统白名单**.
+Open the app, add SSID names, then enable the mode available for that Android version.
 
-## Project source
+## Build
 
-The complete Android Studio project is archived at `source/WifiAllowlist-source.zip` in this repository. The archive contains its own Chinese README with more detailed setup notes.
+Every push to `main` runs the **Build Android APK** workflow. The artifact is named `wifi-allowlist-debug-apk` and contains `app-debug.apk`.
+
+## Privacy
+
+The app stores the SSID list locally using Android app preferences. It does not request Internet permission or upload the list.
