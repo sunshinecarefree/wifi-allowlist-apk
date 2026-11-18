@@ -3,14 +3,14 @@ package com.local.wifiallowlist;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.admin.DevicePolicyManager;
-import android.app.admin.WifiSsidPolicy;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.graphics.Color;
-import android.net.wifi.WifiSsid;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.UserManager;
 import android.view.Gravity;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
@@ -28,8 +28,10 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Standalone, on-device Wi-Fi SSID allowlist manager.
- * Requires Android 13+ and this package to be the Device Owner.
+ * Local Wi-Fi allowlist manager.
+ * Android 13+: system-enforced SSID allowlist.
+ * Android 9-12: limited Device Owner mode that blocks Wi-Fi access-point
+ * changes through Settings; it is NOT a strict SSID allowlist.
  */
 public final class MainActivity extends Activity {
     private static final String PREFS = "wifi_allowlist";
@@ -37,6 +39,7 @@ public final class MainActivity extends Activity {
     private static final String PACKAGE_NAME = "com.local.wifiallowlist";
 
     private DevicePolicyManager dpm;
+    private ComponentName admin;
     private EditText ssidInput;
     private TextView statusText;
     private LinearLayout listContainer;
@@ -46,6 +49,7 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+        admin = new ComponentName(this, AdminReceiver.class);
         loadSsids();
         buildUi();
         refreshStatus();
@@ -61,7 +65,10 @@ public final class MainActivity extends Activity {
 
         TextView title = text("Wi-Fi 白名单", 26, Color.rgb(25, 35, 52), true);
         root.addView(title);
-        TextView subtitle = text("只允许连接你添加到列表中的 Wi-Fi 网络", 14, Color.rgb(90, 100, 115), false);
+        String subtitleText = Build.VERSION.SDK_INT >= 33
+                ? "系统级限制：只允许连接白名单中的 Wi-Fi"
+                : "旧版兼容模式：限制通过系统设置更改 Wi-Fi，非严格白名单";
+        TextView subtitle = text(subtitleText, 14, Color.rgb(90, 100, 115), false);
         LinearLayout.LayoutParams subParams = params(-1, -2);
         subParams.topMargin = dp(6);
         root.addView(subtitle, subParams);
@@ -100,7 +107,7 @@ public final class MainActivity extends Activity {
             return false;
         });
 
-        TextView listTitle = text("已允许的网络", 16, Color.rgb(25, 35, 52), true);
+        TextView listTitle = text("已添加的网络", 16, Color.rgb(25, 35, 52), true);
         LinearLayout.LayoutParams listHeadingParams = params(-1, -2);
         listHeadingParams.topMargin = dp(22);
         root.addView(listTitle, listHeadingParams);
@@ -114,21 +121,22 @@ public final class MainActivity extends Activity {
         root.addView(listContainer, listParams);
         renderList();
 
-        Button applyButton = button("启用系统白名单");
+        Button applyButton = button(Build.VERSION.SDK_INT >= 33 ? "启用系统 Wi-Fi 白名单" : "启用旧版 Wi-Fi 受限模式");
         LinearLayout.LayoutParams applyParams = params(-1, -2);
         applyParams.topMargin = dp(22);
         root.addView(applyButton, applyParams);
         applyButton.setOnClickListener(v -> applyAllowlist());
 
-        Button clearButton = button("关闭白名单限制");
+        Button clearButton = button("关闭 Wi-Fi 限制");
         LinearLayout.LayoutParams clearParams = params(-1, -2);
         clearParams.topMargin = dp(8);
         root.addView(clearButton, clearParams);
         clearButton.setOnClickListener(v -> clearPolicy());
 
-        TextView note = text(
-                "注意：启用前，请先把当前正在使用的 Wi-Fi 加入白名单。SSID 必须完全一致；同名 Wi-Fi 会被视为同一个名称。此功能只限制连接，不会自动填写 Wi-Fi 密码。",
-                12, Color.rgb(90, 100, 115), false);
+        String noteText = Build.VERSION.SDK_INT >= 33
+                ? "Android 13+：系统会阻止连接名单之外的 SSID，并在当前网络不符合策略时断开。启用前先把当前 Wi-Fi 加入名单。"
+                : "Android 9–12 兼容限制：启用后会禁止用户通过系统设置更改 Wi-Fi 接入点，但不能阻止已保存的其他 Wi-Fi 自动连接，也不能保证阻止其他应用或系统入口连接非白名单网络。此模式不是真正的 SSID 白名单。";
+        TextView note = text(noteText, 12, Color.rgb(90, 100, 115), false);
         LinearLayout.LayoutParams noteParams = params(-1, -2);
         noteParams.topMargin = dp(14);
         root.addView(note, noteParams);
@@ -160,7 +168,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (allowedSsids.contains(ssid)) {
-            toast("这个 Wi-Fi 已经在白名单中");
+            toast("这个 Wi-Fi 已经在列表中");
             return;
         }
         allowedSsids.add(ssid);
@@ -175,39 +183,55 @@ public final class MainActivity extends Activity {
         saveSsids();
         renderList();
         refreshStatus();
-        toast("已从本地列表删除。若系统白名单已启用，请再次点击“启用系统白名单”同步更改");
+        toast("已删除。Android 13+ 请重新应用系统白名单以同步更改");
     }
 
     private void applyAllowlist() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            toast("需要 Android 13 或更高版本");
-            return;
-        }
         if (!isDeviceOwner()) {
             showNotOwnerDialog();
             return;
         }
         if (allowedSsids.isEmpty()) {
-            toast("请先至少添加一个 Wi-Fi 名称；空列表不能作为系统白名单");
+            toast("请先至少添加一个 Wi-Fi 名称");
             return;
         }
 
+        if (Build.VERSION.SDK_INT >= 33) {
+            applyModernAllowlist();
+        } else {
+            confirmLegacyLimitedMode();
+        }
+    }
+
+    private void applyModernAllowlist() {
         try {
-            Set<WifiSsid> systemSsids = new HashSet<>();
-            for (String ssid : allowedSsids) {
-                systemSsids.add(WifiSsid.fromBytes(ssid.getBytes(StandardCharsets.UTF_8)));
-            }
-            WifiSsidPolicy policy = new WifiSsidPolicy(
-                    WifiSsidPolicy.WIFI_SSID_POLICY_TYPE_ALLOWLIST,
-                    systemSsids);
-            dpm.setWifiSsidPolicy(policy);
+            // Remove a possible legacy restriction if this device was updated from an older build.
+            dpm.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_WIFI);
+            Api33WifiPolicy.setAllowlist(dpm, allowedSsids);
             refreshStatus();
-            toast("系统 Wi-Fi 白名单已启用");
+            toast("系统 Wi-Fi SSID 白名单已启用");
         } catch (SecurityException e) {
             toast("系统拒绝设置策略：请确认本应用是设备所有者");
         } catch (Exception e) {
             toast("设置失败：" + safeMessage(e));
         }
+    }
+
+    private void confirmLegacyLimitedMode() {
+        new AlertDialog.Builder(this)
+                .setTitle("启用 Android 9–12 兼容模式？")
+                .setMessage("旧版 Android 没有系统级 SSID 白名单接口。此模式只会禁止用户通过系统设置更改 Wi-Fi 接入点；已经保存的其他 Wi-Fi 仍可能自动连接，也可能通过其他系统入口或应用连接。它不能保证设备只连接此列表。\n\n是否继续启用这项受限管理？")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("启用受限模式", (dialog, which) -> {
+                    try {
+                        dpm.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_WIFI);
+                        refreshStatus();
+                        toast("旧版 Wi-Fi 受限模式已启用（并非严格白名单）");
+                    } catch (Exception e) {
+                        toast("启用失败：" + safeMessage(e));
+                    }
+                })
+                .show();
     }
 
     private void clearPolicy() {
@@ -216,14 +240,17 @@ public final class MainActivity extends Activity {
             return;
         }
         new AlertDialog.Builder(this)
-                .setTitle("关闭 Wi-Fi 白名单？")
-                .setMessage("系统将不再限制可连接的 Wi-Fi。白名单条目仍会保留在本机，之后可以再次启用。")
+                .setTitle("关闭 Wi-Fi 限制？")
+                .setMessage("系统将恢复 Wi-Fi 接入点配置权限。保存在本机的名单不会删除。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("关闭限制", (dialog, which) -> {
                     try {
-                        dpm.setWifiSsidPolicy(null);
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            Api33WifiPolicy.clear(dpm);
+                        }
+                        dpm.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_WIFI);
                         refreshStatus();
-                        toast("系统 Wi-Fi 白名单限制已关闭");
+                        toast("Wi-Fi 限制已关闭");
                     } catch (Exception e) {
                         toast("关闭失败：" + safeMessage(e));
                     }
@@ -237,22 +264,26 @@ public final class MainActivity extends Activity {
         status.append("Android：").append(Build.VERSION.RELEASE)
                 .append("（API ").append(Build.VERSION.SDK_INT).append("）\n");
         status.append("设备所有者：").append(isDeviceOwner() ? "已启用" : "未启用").append("\n");
-        status.append("本地白名单：").append(allowedSsids.size()).append(" 个网络\n");
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && isDeviceOwner()) {
+        status.append("本地名单：").append(allowedSsids.size()).append(" 个网络\n");
+
+        if (!isDeviceOwner()) {
+            status.append("系统限制：尚未设置");
+        } else if (Build.VERSION.SDK_INT >= 33) {
             try {
-                WifiSsidPolicy current = dpm.getWifiSsidPolicy();
-                if (current == null) {
-                    status.append("系统限制：未启用");
-                } else if (current.getPolicyType() == WifiSsidPolicy.WIFI_SSID_POLICY_TYPE_ALLOWLIST) {
-                    status.append("系统限制：白名单已启用（").append(current.getSsids().size()).append(" 个 SSID）");
-                } else {
-                    status.append("系统限制：当前为拒绝列表模式");
-                }
+                status.append("系统限制：").append(Api33WifiPolicy.describe(dpm));
             } catch (Exception e) {
                 status.append("系统限制：读取失败");
             }
         } else {
-            status.append("系统限制：需要 Android 13+ 且本应用为设备所有者");
+            try {
+                boolean restricted = dpm.getUserRestrictions(admin)
+                        .getBoolean(UserManager.DISALLOW_CONFIG_WIFI, false);
+                status.append(restricted
+                        ? "系统限制：旧版受限模式已启用（非严格 SSID 白名单）"
+                        : "系统限制：旧版受限模式未启用");
+            } catch (Exception e) {
+                status.append("系统限制：旧版状态读取失败");
+            }
         }
         statusText.setText(status.toString());
     }
@@ -297,7 +328,7 @@ public final class MainActivity extends Activity {
         new AlertDialog.Builder(this)
                 .setTitle("尚未取得设备所有者权限")
                 .setMessage("仅开启普通“设备管理员”不够。请先在电脑安装 ADB，连接手机并执行：\n\n" + command
-                        + "\n\n通常需要在设备刚恢复出厂设置、尚未添加账号、没有其他用户或工作资料时设置。设置设备所有者可能需要重新初始化设备，请先备份数据。")
+                        + "\n\n设置设备所有者通常需要设备处于刚恢复出厂设置后的初始状态。请先备份数据。")
                 .setPositiveButton("知道了", null)
                 .show();
     }
@@ -309,11 +340,14 @@ public final class MainActivity extends Activity {
         }
         new AlertDialog.Builder(this)
                 .setTitle("解除设备所有者？")
-                .setMessage("仅用于测试和维护。将先清除本应用设置的 Wi-Fi SSID 策略，再解除设备所有者。Android 官方将此接口标记为测试用途；其他由管理应用设置的策略不一定全部清除。")
+                .setMessage("将先清除本应用设置的 Wi-Fi 限制，再解除设备所有者。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("解除", (dialog, which) -> {
                     try {
-                        dpm.setWifiSsidPolicy(null);
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            Api33WifiPolicy.clear(dpm);
+                        }
+                        dpm.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_WIFI);
                         dpm.clearDeviceOwnerApp(getPackageName());
                         refreshStatus();
                         toast("设备所有者已解除");
@@ -329,7 +363,8 @@ public final class MainActivity extends Activity {
     }
 
     private void loadSsids() {
-        Set<String> saved = getSharedPreferences(PREFS, MODE_PRIVATE).getStringSet(KEY_SSIDS, Collections.emptySet());
+        Set<String> saved = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getStringSet(KEY_SSIDS, Collections.emptySet());
         allowedSsids.clear();
         if (saved != null) allowedSsids.addAll(saved);
     }
@@ -371,6 +406,7 @@ public final class MainActivity extends Activity {
 
     private String safeMessage(Exception e) {
         String message = e.getMessage();
-        return message == null || message.trim().isEmpty() ? e.getClass().getSimpleName() : message;
+        return message == null || message.trim().isEmpty()
+                ? e.getClass().getSimpleName() : message;
     }
 }
